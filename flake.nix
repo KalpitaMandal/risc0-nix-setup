@@ -1,33 +1,105 @@
 {
-  description = "A very basic flake";
+  description = "A risc0 verifier flake";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/24.05";
-    fenix = {
-      url = "github:nix-community/fenix";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-    naersk = {
-      url = "github:nix-community/naersk";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
     nitro-util = {
       url = "github:monzo/aws-nitro-util";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    oyster = {
-      url = "github:marlinprotocol/oyster-monorepo";
+    supervisord = {
+      url = "github:marlinprotocol/oyster-monorepo/external/supervisord.nix";
+    };
+    dnsproxy = {
+      url = "github:marlinprotocol/oyster-monorepo/external/dnsproxy.nix";
+    };
+    keygen = {
+      url = "github:marlinprotocol/oyster-monorepo/initialization/keygen";
+    };
+    tcp-proxy = {
+      url = "github:marlinprotocol/oyster-monorepo/networking/tcp-proxy";
+    };
+    attestation-server = {
+      url = "github:marlinprotocol/oyster-monorepo/attestation/server";
+    };
+    attestation-verifier = {
+      url = "github:marlinprotocol/oyster-monorepo/attestation/verifier";
+    };
+    kernels = {
+      url = "github:marlinprotocol/oyster-monorepo/kernels/vanilla.nix";
     };
   };
 
-  outputs = { self, nixpkgs, fenix,
-    naersk,
+  outputs = { self, 
+    nixpkgs,
     nitro-util,
-    oyster }: {
+    systemConfig,
+    supervisord,
+    dnsproxy,
+    keygen,
+    tcp-proxy,
+    attestation-server,
+    attestation-verifier,
+    kernels}:let
+  system = systemConfig.system;
+  nitro = nitro-util.lib.${system};
+  eifArch = systemConfig.eif_arch;
+  pkgs = nixpkgs.legacyPackages."${system}";
+  supervisord' = "${supervisord}/bin/supervisord";
+  dnsproxy' = "${dnsproxy}/bin/dnsproxy";
+  keygenEd25519 = "${keygen}/bin/keygen-ed25519";
+  itvtProxy = "${tcp-proxy}/bin/ip-to-vsock-transparent";
+  vtiProxy = "${tcp-proxy}/bin/vsock-to-ip";
+  attestationServer = "${attestation-server}/bin/oyster-attestation-server";
+  keygenSecp256k1 = "${keygen}/bin/keygen-secp256k1";
+  attestationVerifier = "${attestation-verifier}/bin/oyster-attestation-verifier";
+  kernel = kernels.kernel;
+  kernelConfig = kernels.kernelConfig;
+  nsmKo = kernels.nsmKo;
+  init = kernels.init;
+  setup = ./. + "/setup.sh";
+  supervisorConf = ./. + "/supervisord.conf";
+  app = pkgs.runCommand "app" {} ''
+    echo Preparing the app folder
+    pwd
+    mkdir -p $out
+    mkdir -p $out/app
+    mkdir -p $out/etc
+    cp ${supervisord'} $out/app/supervisord
+    cp ${keygenEd25519} $out/app/keygen-ed25519
+    cp ${itvtProxy} $out/app/ip-to-vsock-transparent
+    cp ${vtiProxy} $out/app/vsock-to-ip
+    cp ${attestationServer} $out/app/attestation-server
+    cp ${dnsproxy'} $out/app/dnsproxy
+    cp ${keygenSecp256k1} $out/app/keygen-secp256k1
+    cp ${attestationVerifier} $out/app/attestation-verifier
+    cp ${setup} $out/app/setup.sh
+    chmod +x $out/app/*
+    cp ${supervisorConf} $out/etc/supervisord.conf
+  '';
+  # kinda hacky, my nix-fu is not great, figure out a better way
+  initPerms = pkgs.runCommand "initPerms" {} ''
+    cp ${init} $out
+    chmod +x $out
+  '';
+in {
+  default = nitro.buildEif {
+    name = "enclave";
+    arch = eifArch;
 
-    packages.x86_64-linux.hello = nixpkgs.legacyPackages.x86_64-linux.hello;
+    init = initPerms;
+    kernel = kernel;
+    kernelConfig = kernelConfig;
+    nsmKo = nsmKo;
+    cmdline = builtins.readFile nitro.blobs.${eifArch}.cmdLine;
 
-    packages.x86_64-linux.default = self.packages.x86_64-linux.hello;
-
+    entrypoint = "/app/setup.sh";
+    env = "";
+    copyToRoot = pkgs.buildEnv {
+      name = "image-root";
+      paths = [app pkgs.busybox pkgs.nettools pkgs.iproute2 pkgs.iptables-legacy];
+      pathsToLink = ["/bin" "/app" "/etc"];
+    };
   };
+}
 }
